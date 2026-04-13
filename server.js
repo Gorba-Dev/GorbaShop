@@ -135,7 +135,9 @@ async function transferCoreAssetToBuyer(buyerWallet) {
 
   return getPublicKeyString(result.signature) || result.signature;
 }
-
+app.get("/", (req, res) => {
+  res.send("GORBA backend is live.");
+});
 app.get("/status", (req, res) => {
   res.json({
     sold: nftSold,
