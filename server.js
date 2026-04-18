@@ -21,30 +21,54 @@ const PORT = Number(process.env.PORT || 3001);
 const RPC_URL = process.env.RPC_URL;
 const GORBA_MINT = process.env.GORBA_MINT;
 const RECEIVER_WALLET = process.env.RECEIVER_WALLET;
-const GORBA_PRICE = Number(process.env.GORBA_PRICE || "16000");
 const GORBA_DECIMALS = Number(process.env.GORBA_DECIMALS || "6");
-const CORE_ASSET_ID = process.env.CORE_ASSET_ID;
 const SHOP_WALLET_PRIVATE_KEY_BASE58 = process.env.SHOP_WALLET_PRIVATE_KEY_BASE58;
 
-if (
-  !RPC_URL ||
-  !GORBA_MINT ||
-  !RECEIVER_WALLET ||
-  !CORE_ASSET_ID ||
-  !SHOP_WALLET_PRIVATE_KEY_BASE58
-) {
+if (!RPC_URL || !GORBA_MINT || !RECEIVER_WALLET || !SHOP_WALLET_PRIVATE_KEY_BASE58) {
   throw new Error("Missing required environment variables.");
 }
 
 const connection = new Connection(RPC_URL, "confirmed");
 
-let nftSold = false;
-let soldTo = null;
-let paymentUsed = new Set();
+const ITEMS = {
+  nft1: {
+    name: "NFT 1",
+    assetId: process.env.NFT1_ASSET_ID,
+    price: Number(process.env.NFT1_PRICE || "16000"),
+    sold: false,
+    soldTo: null,
+  },
+  nft2: {
+    name: "NFT 2",
+    assetId: process.env.NFT2_ASSET_ID,
+    price: Number(process.env.NFT2_PRICE || "16000"),
+    sold: false,
+    soldTo: null,
+  },
+  nft3: {
+    name: "NFT 3",
+    assetId: process.env.NFT3_ASSET_ID,
+    price: Number(process.env.NFT3_PRICE || "16000"),
+    sold: false,
+    soldTo: null,
+  },
+  nft4: {
+    name: "NFT 4",
+    assetId: process.env.NFT4_ASSET_ID,
+    price: Number(process.env.NFT4_PRICE || "16000"),
+    sold: false,
+    soldTo: null,
+  },
+};
 
-function getExpectedAmountBaseUnits() {
-  return BigInt(GORBA_PRICE) * BigInt(10 ** GORBA_DECIMALS);
+// Remove items that do not have an asset ID yet
+for (const key of Object.keys(ITEMS)) {
+  if (!ITEMS[key].assetId) {
+    delete ITEMS[key];
+  }
 }
+
+const paymentUsed = new Set();
 
 function getPublicKeyString(value) {
   if (!value) return null;
@@ -53,7 +77,7 @@ function getPublicKeyString(value) {
   return null;
 }
 
-async function verifyPayment(paymentSignature, buyerWallet) {
+async function verifyPayment(paymentSignature, buyerWallet, expectedPriceUi) {
   const tx = await connection.getParsedTransaction(paymentSignature, {
     commitment: "confirmed",
     maxSupportedTransactionVersion: 0,
@@ -73,7 +97,7 @@ async function verifyPayment(paymentSignature, buyerWallet) {
     new PublicKey(RECEIVER_WALLET)
   ).toBase58();
 
-  const expectedAmount = getExpectedAmountBaseUnits();
+  const expectedAmount = BigInt(expectedPriceUi) * BigInt(10 ** GORBA_DECIMALS);
 
   let validPayment = false;
 
@@ -121,7 +145,7 @@ async function verifyPayment(paymentSignature, buyerWallet) {
   return true;
 }
 
-async function transferCoreAssetToBuyer(buyerWallet) {
+async function transferCoreAssetToBuyer(assetId, buyerWallet) {
   const secretBytes = bs58.decode(SHOP_WALLET_PRIVATE_KEY_BASE58);
 
   const umi = createUmi(RPC_URL);
@@ -129,40 +153,59 @@ async function transferCoreAssetToBuyer(buyerWallet) {
   umi.use(keypairIdentity(umiKeypair));
 
   const result = await transferV1(umi, {
-    asset: publicKey(CORE_ASSET_ID),
+    asset: publicKey(assetId),
     newOwner: publicKey(buyerWallet),
   }).sendAndConfirm(umi);
 
   return getPublicKeyString(result.signature) || result.signature;
 }
+
 app.get("/", (req, res) => {
-  res.status(200).send("GORBA backend is live.");
+  res.send("GORBA backend is live.");
 });
 
 app.get("/status", (req, res) => {
-  console.log("STATUS ROUTE HIT");
+  const items = {};
+
+  for (const [itemId, item] of Object.entries(ITEMS)) {
+    items[itemId] = {
+      name: item.name,
+      price: item.price,
+      sold: item.sold,
+      soldTo: item.soldTo,
+    };
+  }
+
   res.status(200).json({
     ok: true,
-    sold: nftSold,
-    soldTo: soldTo,
+    items,
   });
 });
 
 app.post("/complete-purchase", async (req, res) => {
   try {
-    const { buyerWallet, paymentSignature } = req.body;
+    const { buyerWallet, paymentSignature, itemId } = req.body;
 
-    if (!buyerWallet || !paymentSignature) {
+    if (!buyerWallet || !paymentSignature || !itemId) {
       return res.status(400).json({
         success: false,
-        error: "Missing buyerWallet or paymentSignature.",
+        error: "Missing buyerWallet, paymentSignature, or itemId.",
       });
     }
 
-    if (nftSold) {
+    const item = ITEMS[itemId];
+
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        error: "Item not found.",
+      });
+    }
+
+    if (item.sold) {
       return res.status(409).json({
         success: false,
-        error: "NFT already sold.",
+        error: "This item is already sold.",
       });
     }
 
@@ -173,19 +216,20 @@ app.post("/complete-purchase", async (req, res) => {
       });
     }
 
-    await verifyPayment(paymentSignature, buyerWallet);
+    await verifyPayment(paymentSignature, buyerWallet, item.price);
 
-    const nftSignature = await transferCoreAssetToBuyer(buyerWallet);
+    const nftSignature = await transferCoreAssetToBuyer(item.assetId, buyerWallet);
 
-    nftSold = true;
-    soldTo = buyerWallet;
+    item.sold = true;
+    item.soldTo = buyerWallet;
     paymentUsed.add(paymentSignature);
 
     return res.json({
       success: true,
+      itemId,
       nftSignature,
-      sold: true,
-      soldTo,
+      sold: item.sold,
+      soldTo: item.soldTo,
     });
   } catch (error) {
     console.error("complete-purchase error:", error);
@@ -198,5 +242,5 @@ app.post("/complete-purchase", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`GORBA backend running on http://localhost:${PORT}`);
+  console.log(`GORBA backend running on port ${PORT}`);
 });
